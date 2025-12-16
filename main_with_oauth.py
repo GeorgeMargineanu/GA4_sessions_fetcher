@@ -34,7 +34,7 @@ def _get_user_credentials_from_request(request) -> Tuple[Credentials, str]:
 
 # ========== FUNCTION 1: LIST ACCOUNTS + PROPERTIES ==========
 
-def ga4_list_accounts(request):
+def ga4_list_accounts_oauth(request):
     """
     HTTP Cloud Function (GET) that returns all GA4 accounts and their properties
     for the user whose OAuth access token is provided in the Authorization header.
@@ -82,7 +82,7 @@ def ga4_list_accounts(request):
 
 # ========== FUNCTION 2: SESSIONS FOR A GIVEN PROPERTY ==========
 
-def ga4_property_sessions(request):
+def ga4_property_sessions_oauth(request):
     """
     HTTP Cloud Function that returns sessions for a given property id.
 
