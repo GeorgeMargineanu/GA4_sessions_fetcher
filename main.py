@@ -1,5 +1,6 @@
 import json
 from typing import Tuple
+import traceback
 
 from google.analytics.admin import AnalyticsAdminServiceClient
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
@@ -11,14 +12,13 @@ from google.oauth2.credentials import Credentials
 # CORS helpers
 # ----------------------------
 def _cors_headers():
-    # For production you can replace "*" with "http://localhost:5500" and your future domains.
     return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization,Content-Type",
-        "Access-Control-Max-Age": "3600",
         "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     }
+
 
 
 def _handle_preflight(request):
@@ -32,27 +32,19 @@ def _handle_preflight(request):
 # Auth helper
 # ----------------------------
 def _get_user_credentials_from_request(request) -> Tuple[Credentials, str]:
-    """
-    Extracts the OAuth access token from the Authorization header and returns
-    a google.oauth2.credentials.Credentials object.
-
-    Expected header:
-      Authorization: Bearer <ACCESS_TOKEN>
-    """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise ValueError(
-            "Missing or invalid Authorization header. "
-            "Expected: 'Authorization: Bearer <ACCESS_TOKEN>'"
-        )
+        raise ValueError("Missing/invalid Authorization header. Use: Bearer <ACCESS_TOKEN>")
 
     token = auth_header.split(" ", 1)[1].strip()
     if not token:
-        raise ValueError("Empty bearer token in Authorization header.")
+        raise ValueError("Empty bearer token.")
 
-    # We only pass the access token; no refresh in the backend.
-    # When it expires, the FRONT-END must obtain a new access token.
-    creds = Credentials(token=token)
+    # Important: pass scopes hint (helps some libs / debugging)
+    creds = Credentials(
+        token=token,
+        scopes=["https://www.googleapis.com/auth/analytics.readonly"],
+    )
     return creds, token
 
 
@@ -60,45 +52,44 @@ def _get_user_credentials_from_request(request) -> Tuple[Credentials, str]:
 # FUNCTION 1: LIST ACCOUNTS + PROPERTIES
 # ============================
 def ga4_list_accounts_oauth(request):
-    """
-    HTTP Cloud Function (GET) that returns all GA4 accounts and their properties
-    for the user whose OAuth access token is provided in the Authorization header.
-
-    Header required:
-      Authorization: Bearer <ACCESS_TOKEN>
-    """
-    pre = _handle_preflight(request)
-    if pre:
-        return pre
+    # CORS preflight
+    if request.method == "OPTIONS":
+        return ("", 204, _cors_headers())
 
     try:
         user_creds, _ = _get_user_credentials_from_request(request)
-    except ValueError as e:
-        return (json.dumps({"error": str(e)}), 401, _cors_headers())
 
-    client = AnalyticsAdminServiceClient(credentials=user_creds)
-    accounts_data = []
+        client = AnalyticsAdminServiceClient(credentials=user_creds)
+        accounts_data = []
 
-    for summary in client.list_account_summaries():
-        account_entry = {
-            "account": summary.account,
-            "displayName": summary.display_name,
-            "properties": [],
+        for summary in client.list_account_summaries():
+            account_entry = {
+                "account": summary.account,
+                "displayName": summary.display_name,
+                "properties": [],
+            }
+
+            for prop_summary in summary.property_summaries:
+                prop_id = prop_summary.property.split("/")[-1]
+                account_entry["properties"].append(
+                    {
+                        "property": prop_summary.property,
+                        "propertyId": prop_id,
+                        "displayName": prop_summary.display_name,
+                    }
+                )
+
+            accounts_data.append(account_entry)
+
+        return (json.dumps({"accounts": accounts_data}), 200, _cors_headers())
+
+    except Exception as e:
+        # Return full debug information to the caller (temporary, for testing)
+        err = {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
         }
-
-        for prop_summary in summary.property_summaries:
-            prop_id = prop_summary.property.split("/")[-1]
-            account_entry["properties"].append(
-                {
-                    "property": prop_summary.property,
-                    "propertyId": prop_id,
-                    "displayName": prop_summary.display_name,
-                }
-            )
-
-        accounts_data.append(account_entry)
-
-    return (json.dumps({"accounts": accounts_data}), 200, _cors_headers())
+        return (json.dumps(err), 500, _cors_headers())
 
 
 # ============================
