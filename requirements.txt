@@ -1,3 +1,4 @@
 google-analytics-admin
 google-analytics-data
 functions-framework
+google-auth
