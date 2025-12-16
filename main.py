@@ -7,6 +7,30 @@ from google.analytics.data_v1beta.types import RunReportRequest
 from google.oauth2.credentials import Credentials
 
 
+# ----------------------------
+# CORS helpers
+# ----------------------------
+def _cors_headers():
+    # For production you can replace "*" with "http://localhost:5500" and your future domains.
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Authorization,Content-Type",
+        "Access-Control-Max-Age": "3600",
+        "Content-Type": "application/json",
+    }
+
+
+def _handle_preflight(request):
+    # Browsers send an OPTIONS preflight for requests with Authorization header.
+    if request.method == "OPTIONS":
+        return ("", 204, _cors_headers())
+    return None
+
+
+# ----------------------------
+# Auth helper
+# ----------------------------
 def _get_user_credentials_from_request(request) -> Tuple[Credentials, str]:
     """
     Extracts the OAuth access token from the Authorization header and returns
@@ -32,8 +56,9 @@ def _get_user_credentials_from_request(request) -> Tuple[Credentials, str]:
     return creds, token
 
 
-# ========== FUNCTION 1: LIST ACCOUNTS + PROPERTIES ==========
-
+# ============================
+# FUNCTION 1: LIST ACCOUNTS + PROPERTIES
+# ============================
 def ga4_list_accounts_oauth(request):
     """
     HTTP Cloud Function (GET) that returns all GA4 accounts and their properties
@@ -42,14 +67,14 @@ def ga4_list_accounts_oauth(request):
     Header required:
       Authorization: Bearer <ACCESS_TOKEN>
     """
+    pre = _handle_preflight(request)
+    if pre:
+        return pre
+
     try:
         user_creds, _ = _get_user_credentials_from_request(request)
     except ValueError as e:
-        return (
-            json.dumps({"error": str(e)}),
-            401,
-            {"Content-Type": "application/json"},
-        )
+        return (json.dumps({"error": str(e)}), 401, _cors_headers())
 
     client = AnalyticsAdminServiceClient(credentials=user_creds)
     accounts_data = []
@@ -73,15 +98,12 @@ def ga4_list_accounts_oauth(request):
 
         accounts_data.append(account_entry)
 
-    return (
-        json.dumps({"accounts": accounts_data}),
-        200,
-        {"Content-Type": "application/json"},
-    )
+    return (json.dumps({"accounts": accounts_data}), 200, _cors_headers())
 
 
-# ========== FUNCTION 2: SESSIONS FOR A GIVEN PROPERTY ==========
-
+# ============================
+# FUNCTION 2: SESSIONS FOR A GIVEN PROPERTY
+# ============================
 def ga4_property_sessions_oauth(request):
     """
     HTTP Cloud Function that returns sessions for a given property id.
@@ -94,45 +116,33 @@ def ga4_property_sessions_oauth(request):
         start_date (optional): e.g. "30daysAgo" or "2025-12-01"
         end_date   (optional): e.g. "today" or "2025-12-15"
     """
+    pre = _handle_preflight(request)
+    if pre:
+        return pre
 
     try:
         user_creds, _ = _get_user_credentials_from_request(request)
     except ValueError as e:
-        return (
-            json.dumps({"error": str(e)}),
-            401,
-            {"Content-Type": "application/json"},
-        )
+        return (json.dumps({"error": str(e)}), 401, _cors_headers())
 
     # --- parameters: query string or JSON body ---
-
     property_id = request.args.get("property_id") if request.args else None
     start_date = request.args.get("start_date") if request.args else None
     end_date = request.args.get("end_date") if request.args else None
 
     if not property_id:
-        try:
-            data = request.get_json(silent=True) or {}
-        except Exception:
-            data = {}
+        data = request.get_json(silent=True) or {}
         property_id = property_id or data.get("property_id")
         start_date = start_date or data.get("start_date")
         end_date = end_date or data.get("end_date")
 
     if not property_id:
-        return (
-            json.dumps({"error": "Missing required parameter: property_id"}),
-            400,
-            {"Content-Type": "application/json"},
-        )
+        return (json.dumps({"error": "Missing required parameter: property_id"}), 400, _cors_headers())
 
-    if not start_date:
-        start_date = "30daysAgo"
-    if not end_date:
-        end_date = "today"
+    start_date = start_date or "30daysAgo"
+    end_date = end_date or "today"
 
     # --- GA4 Data API call ---
-
     data_client = BetaAnalyticsDataClient(credentials=user_creds)
 
     request_body = RunReportRequest(
@@ -143,24 +153,14 @@ def ga4_property_sessions_oauth(request):
 
     response = data_client.run_report(request_body)
 
-    if not response.rows:
-        total_sessions = 0
-    else:
+    total_sessions = 0
+    if response.rows:
         total_sessions = int(response.rows[0].metric_values[0].value)
 
     result = {
         "propertyId": property_id,
-        "dateRange": {
-            "start_date": start_date,
-            "end_date": end_date,
-        },
-        "metrics": {
-            "sessions": total_sessions,
-        },
+        "dateRange": {"start_date": start_date, "end_date": end_date},
+        "metrics": {"sessions": total_sessions},
     }
 
-    return (
-        json.dumps(result),
-        200,
-        {"Content-Type": "application/json"},
-    )
+    return (json.dumps(result), 200, _cors_headers())

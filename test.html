@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>GA4 OAuth Function Test</title>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+  </head>
+  <body>
+    <button id="login">Login (get access token)</button>
+    <button id="accounts" disabled>Call ga4-list-accounts_oauth</button>
+    <button id="sessions" disabled>Call ga4-property-sessions_oauth</button>
+    <pre id="out"></pre>
+
+    <script>
+      const CLIENT_ID = "190916943612-3dj82pqhbnt20k3je6la2cric1ba7fdi.apps.googleusercontent.com";
+
+      const LIST_URL =
+        "https://europe-west1-ums-adreal-471711.cloudfunctions.net/ga4-list-accounts_oauth";
+      const SESS_URL =
+        "https://europe-west1-ums-adreal-471711.cloudfunctions.net/ga4-property-sessions_oauth";
+
+      let token = null;
+      const out = document.getElementById("out");
+      const log = (x) => (out.textContent += (typeof x === "string" ? x : JSON.stringify(x, null, 2)) + "\n\n");
+
+      window.onload = () => {
+        const tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: "https://www.googleapis.com/auth/analytics.readonly",
+          callback: (resp) => {
+            token = resp.access_token;
+            log("✅ Token received");
+            document.getElementById("accounts").disabled = false;
+            document.getElementById("sessions").disabled = false;
+          },
+        });
+
+        document.getElementById("login").onclick = () => {
+          tokenClient.requestAccessToken({ prompt: "consent" });
+        };
+
+        document.getElementById("accounts").onclick = async () => {
+          const r = await fetch(LIST_URL, {
+            headers: { Authorization: "Bearer " + token },
+          });
+          log(await r.json());
+        };
+
+        document.getElementById("sessions").onclick = async () => {
+          const params = new URLSearchParams({
+            property_id: "182279779",
+            start_date: "30daysAgo",
+            end_date: "today",
+          });
+          const r = await fetch(SESS_URL + "?" + params.toString(), {
+            headers: { Authorization: "Bearer " + token },
+          });
+          log(await r.json());
+        };
+      };
+    </script>
+  </body>
+</html>
