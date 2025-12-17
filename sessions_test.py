@@ -19,7 +19,7 @@ def get_sessions_for_property(property_id: str,
 
     request = RunReportRequest(
         property=f"properties/{property_id}",
-        metrics=[{"name": "sessions"}],
+        metrics=[{"name": "conversions"}],
         date_ranges=[{"start_date": start_date, "end_date": end_date}],
     )
 
@@ -34,7 +34,7 @@ def get_sessions_for_property(property_id: str,
 
 
 def main():
-    # 👉 Put here the property id you want to test
+    #  Put here the property id you want to test
     property_id = "182279779"  # GA4_web+contweb+shop+app
 
     # Example: sessions in the last 30 days

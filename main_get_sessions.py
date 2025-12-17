@@ -90,11 +90,11 @@ def ga4_list_accounts_oauth(request):
 
 
 # ============================
-# FUNCTION 2: CONVERSIONS FOR A GIVEN PROPERTY
+# FUNCTION 2: SESSIONS FOR A GIVEN PROPERTY
 # ============================
-def ga4_property_conversions_oauth(request):
+def ga4_property_sessions_oauth(request):
     """
-    HTTP Cloud Function that returns conversions for a given property id.
+    HTTP Cloud Function that returns sessions for a given property id.
 
     Required:
       Header:
@@ -135,20 +135,20 @@ def ga4_property_conversions_oauth(request):
 
     request_body = RunReportRequest(
         property=f"properties/{property_id}",
-        metrics=[{"name": "conversions"}], 
+        metrics=[{"name": "sessions"}],
         date_ranges=[{"start_date": start_date, "end_date": end_date}],
     )
 
     response = data_client.run_report(request_body)
 
-    total_conversions = 0
+    total_sessions = 0
     if response.rows:
-        total_conversions = int(response.rows[0].metric_values[0].value)
+        total_sessions = int(response.rows[0].metric_values[0].value)
 
     result = {
         "propertyId": property_id,
         "dateRange": {"start_date": start_date, "end_date": end_date},
-        "metrics": {"conversions": total_conversions},  
+        "metrics": {"sessions": total_sessions},
     }
 
     return (json.dumps(result), 200, _cors_headers())
