@@ -14,9 +14,7 @@ from google.analytics.data_v1beta.types import (
     OrderBy,
     FilterExpression,
     Filter,
-    StringFilter,
 )
-
 
 
 # ----------------------------
@@ -252,11 +250,14 @@ def ga4_property_conversion_breakdown_oauth(request):
     #    (This is the most stable way across implementations.)
     # -----------------------------
     paid_filter = FilterExpression(
-        filter=Filter(
-            field_name="sessionDefaultChannelGroup",
-            string_filter=StringFilter(match_type=StringFilter.MatchType.REGEXP, value="(?i)^paid"),
-        )
+    filter=Filter(
+        field_name="sessionDefaultChannelGroup",
+        string_filter=Filter.StringFilter(
+            match_type=Filter.StringFilter.MatchType.FULL_REGEXP,
+            value="(?i)^paid"
+        ),
     )
+)
 
     paid_req = RunReportRequest(
         property=prop,
