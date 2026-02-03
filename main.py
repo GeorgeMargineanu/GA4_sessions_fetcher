@@ -346,3 +346,151 @@ def ga4_property_conversion_breakdown_oauth(request):
     }
 
     return (json.dumps(result), 200, _cors_headers())
+
+def ga4_session_marketing_rows_oauth(request):
+    """
+    Returns raw session-level marketing breakdown rows.
+
+    Required:
+      Authorization: Bearer <ACCESS_TOKEN> (analytics.readonly)
+
+    Params (query string or JSON body):
+      property_id (required): e.g. "182279779"
+      start_date (optional): default "30daysAgo"
+      end_date   (optional): default "today"
+      limit      (optional): default 10000
+      offset     (optional): default 0
+      dims       (optional): comma-separated GA4 dimensions to use instead of defaults
+                             default:
+                               sessionSourceMedium,sessionSource,sessionMedium,sessionCampaignName
+
+    Response:
+      {
+        propertyId,
+        dateRange,
+        dims,
+        limit,
+        offset,
+        rowCount,
+        rows: [
+          {
+            "sessionSourceMedium": "...",
+            "sessionSource": "...",
+            "sessionMedium": "...",
+            "sessionCampaignName": "...",
+            "sessions": 123,
+            "conversions": 4,
+            "sessionConversionRate": 0.0123
+          }, ...
+        ]
+      }
+    """
+    pre = _handle_preflight(request)
+    if pre:
+        return pre
+
+    try:
+        user_creds, _ = _get_user_credentials_from_request(request)
+    except ValueError as e:
+        return (json.dumps({"error": str(e)}), 401, _cors_headers())
+
+    # ---- parameters: query string or JSON body ----
+    args = request.args or {}
+    data = request.get_json(silent=True) or {}
+
+    property_id = args.get("property_id") or data.get("property_id")
+    start_date  = args.get("start_date")  or data.get("start_date")  or "30daysAgo"
+    end_date    = args.get("end_date")    or data.get("end_date")    or "today"
+
+    limit_raw   = args.get("limit")       or data.get("limit")       or 10000
+    offset_raw  = args.get("offset")      or data.get("offset")      or 0
+
+    dims_raw    = args.get("dims")        or data.get("dims")
+
+    if not property_id:
+        return (json.dumps({"error": "Missing required parameter: property_id"}), 400, _cors_headers())
+
+    try:
+        limit = int(limit_raw)
+    except Exception:
+        limit = 10000
+
+    try:
+        offset = int(offset_raw)
+    except Exception:
+        offset = 0
+
+    # Safe bounds
+    if limit <= 0:
+        limit = 10000
+    if limit > 100000:
+        limit = 100000
+    if offset < 0:
+        offset = 0
+
+    # Default dimensions
+    dims = [
+        "sessionSourceMedium",
+        "sessionSource",
+        "sessionMedium",
+        "sessionCampaignName",
+    ]
+
+    # Allow override via dims=dim1,dim2,...
+    if dims_raw:
+        dims = [d.strip() for d in str(dims_raw).split(",") if d.strip()]
+
+    data_client = BetaAnalyticsDataClient(credentials=user_creds)
+    prop = f"properties/{property_id}"
+    dr = [DateRange(start_date=start_date, end_date=end_date)]
+
+    req = RunReportRequest(
+        property=prop,
+        date_ranges=dr,
+        dimensions=[Dimension(name=d) for d in dims],
+        metrics=[
+            Metric(name="sessions"),
+            Metric(name="conversions"),
+            Metric(name="sessionConversionRate"),
+        ],
+        order_bys=[OrderBy(metric={"metric_name": "sessions"}, desc=True)],
+        limit=limit,
+        offset=offset,
+    )
+
+    res = data_client.run_report(req)
+
+    def safe_int(v):
+        try:
+            return int(float(v))
+        except Exception:
+            return 0
+
+    def safe_float(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    rows = []
+    if res.rows:
+        for r in res.rows:
+            out = {}
+            # dimension values
+            for i, d in enumerate(dims):
+                out[d] = r.dimension_values[i].value if i < len(r.dimension_values) else ""
+            # metric values
+            out["sessions"] = safe_int(r.metric_values[0].value) if len(r.metric_values) > 0 else 0
+            out["conversions"] = safe_int(r.metric_values[1].value) if len(r.metric_values) > 1 else 0
+            out["sessionConversionRate"] = safe_float(r.metric_values[2].value) if len(r.metric_values) > 2 else 0.0
+            rows.append(out)
+
+    return (json.dumps({
+        "propertyId": property_id,
+        "dateRange": {"start_date": start_date, "end_date": end_date},
+        "dims": dims,
+        "limit": limit,
+        "offset": offset,
+        "rowCount": len(rows),
+        "rows": rows,
+    }), 200, _cors_headers())
