@@ -4,8 +4,6 @@ import traceback
 
 from google.analytics.admin import AnalyticsAdminServiceClient
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
-from google.analytics.data_v1beta.types import RunReportRequest
-from google.oauth2.credentials import Credentials
 from google.analytics.data_v1beta.types import (
     RunReportRequest,
     Dimension,
@@ -15,6 +13,7 @@ from google.analytics.data_v1beta.types import (
     FilterExpression,
     Filter,
 )
+from google.oauth2.credentials import Credentials
 
 
 # ----------------------------
@@ -250,14 +249,16 @@ def ga4_property_conversion_breakdown_oauth(request):
     #    (This is the most stable way across implementations.)
     # -----------------------------
     paid_filter = FilterExpression(
-    filter=Filter(
-        field_name="sessionDefaultChannelGroup",
-        string_filter=Filter.StringFilter(
-            match_type=Filter.StringFilter.MatchType.FULL_REGEXP,
-            value="(?i)^paid"
-        ),
+        filter=Filter(
+            field_name="sessionDefaultChannelGroup",
+            string_filter=Filter.StringFilter(
+                # Use PARTIAL_REGEXP (most widely supported) and match beginning
+                match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                value="^Paid"
+            ),
+        )
     )
-)
+
 
     paid_req = RunReportRequest(
         property=prop,

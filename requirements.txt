@@ -1,4 +1,6 @@
-google-analytics-admin
-google-analytics-data
-functions-framework
-google-auth
+cat > requirements.txt << 'EOF'
+functions-framework==3.*
+google-analytics-admin==0.24.*
+google-analytics-data==0.18.*
+google-auth==2.*
+EOF
