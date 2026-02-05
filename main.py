@@ -241,7 +241,7 @@ def ga4_property_conversion_breakdown_oauth(request):
                 field_name="sessionDefaultChannelGroup",
                 string_filter=Filter.StringFilter(
                     match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                    value="(?i)^paid"  # case-insensitive
+                    value="(?i)^paid|cpc|cpm|ppc"  # case-insensitive
                 ),
             )
         )
