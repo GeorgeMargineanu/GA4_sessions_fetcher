@@ -11,6 +11,7 @@ from google.analytics.data_v1beta.types import (
     DateRange,
     OrderBy,
     FilterExpression,
+    FilterExpressionList,
     Filter,
 )
 from google.oauth2.credentials import Credentials
@@ -237,23 +238,53 @@ def ga4_property_conversion_breakdown_oauth(request):
         # and SUM conversions across returned rows
         # -----------------------------
         paid_filter = FilterExpression(
-            filter=Filter(
-                field_name="sessionDefaultChannelGroup",
-                string_filter=Filter.StringFilter(
-                    match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                    value="(?i)^paid|cpc|cpm|ppc"  # case-insensitive
+            or_group=FilterExpressionList(expressions=[
+                # A) sessionDefaultChannelGroup starts with "Paid" (Paid Search, Paid Social, etc.)
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionDefaultChannelGroup",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value="(?i)^paid"
+                        ),
+                    )
                 ),
-            )
+                # B) sessionMedium is cpc / cpm / paid 
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionMedium",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value=r"(?i)^(cpc|cpm|ppc|paid)$"
+                        ),
+                    )
+                ),
+                # (Optional, but helpful) C) sessionSourceMedium contains /cpc or /cpm etc.
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionSourceMedium",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value=r"(?i)/(cpc|cpm|ppc|paid)$"
+                        ),
+                    )
+                ),
+            ])
         )
 
         paid_req = RunReportRequest(
             property=prop,
             date_ranges=dr,
-            dimensions=[Dimension(name="sessionDefaultChannelGroup")],  # <-- important
+            dimensions=[
+                Dimension(name="sessionDefaultChannelGroup"),
+                Dimension(name="sessionMedium"),
+                Dimension(name="sessionSourceMedium"),
+            ],
             metrics=[Metric(name="conversions")],
             dimension_filter=paid_filter,
-            limit=100,
+            limit=1000,
         )
+
         paid_res = run(paid_req)
         paid_conversions = 0
         if paid_res.rows:
@@ -329,7 +360,6 @@ def ga4_property_conversion_breakdown_oauth(request):
         return (json.dumps(result), 200, _cors_headers())
 
     except Exception as e:
-        # 🔥 This is what you were missing: real error output
         err = {
             "error": str(e),
             "traceback": traceback.format_exc(),
