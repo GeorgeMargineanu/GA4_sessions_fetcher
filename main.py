@@ -514,3 +514,163 @@ def ga4_session_marketing_rows_oauth(request):
         "rowCount": len(rows),
         "rows": rows,
     }), 200, _cors_headers())
+
+# ============================
+# FUNCTION: DEVICE + AGE + GENDER BREAKDOWNS
+# ============================
+def ga4_device_age_gender_breakdown_oauth(request):
+    """
+    Returns (for a GA4 property + date range):
+      - Device breakdown: deviceCategory -> conversions, sessions, sessionConversionRate
+      - Age breakdown: userAgeBracket -> conversions
+      - Gender breakdown: userGender -> conversions
+
+    Required:
+      Header:
+        Authorization: Bearer <ACCESS_TOKEN>  (analytics.readonly)
+
+    Params (query string OR JSON body):
+      property_id (required): e.g. "182279779"
+      start_date (optional): default "30daysAgo" (or "2025-12-01")
+      end_date   (optional): default "today" (or "2025-12-31")
+
+    Response:
+      {
+        "propertyId": "...",
+        "dateRange": {"start_date":"...", "end_date":"..."},
+        "device": {
+          "dimension": "deviceCategory",
+          "rows": [{"device":"mobile","conversions":123,"sessions":456,"conversionRate":0.0123}, ...]
+        },
+        "age": {
+          "dimension":"userAgeBracket",
+          "rows":[{"age":"18-24","conversions":322}, ...]
+        },
+        "gender": {
+          "dimension":"userGender",
+          "rows":[{"gender":"male","conversions":1425}, ...]
+        }
+      }
+    """
+    pre = _handle_preflight(request)
+    if pre:
+        return pre
+
+    try:
+        user_creds, _ = _get_user_credentials_from_request(request)
+    except ValueError as e:
+        return (json.dumps({"error": str(e)}), 401, _cors_headers())
+
+    # ---- parameters: query string or JSON body ----
+    args = request.args or {}
+    data = request.get_json(silent=True) or {}
+
+    property_id = args.get("property_id") or data.get("property_id")
+    start_date  = args.get("start_date")  or data.get("start_date")  or "30daysAgo"
+    end_date    = args.get("end_date")    or data.get("end_date")    or "today"
+
+    if not property_id:
+        return (json.dumps({"error": "Missing required parameter: property_id"}), 400, _cors_headers())
+
+    data_client = BetaAnalyticsDataClient(credentials=user_creds)
+    prop = f"properties/{property_id}"
+    dr = [DateRange(start_date=start_date, end_date=end_date)]
+
+    def safe_int(v):
+        try:
+            return int(float(v))
+        except Exception:
+            return 0
+
+    def safe_float(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    def run(req: RunReportRequest):
+        return data_client.run_report(req)
+
+    # -----------------------------
+    # 1) DEVICE: deviceCategory
+    # -----------------------------
+    device_req = RunReportRequest(
+        property=prop,
+        date_ranges=dr,
+        dimensions=[Dimension(name="deviceCategory")],
+        metrics=[
+            Metric(name="conversions"),
+            Metric(name="sessions"),
+            Metric(name="sessionConversionRate"),
+        ],
+        order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
+        limit=50,
+    )
+    device_res = run(device_req)
+
+    device_rows = []
+    if device_res.rows:
+        for r in device_res.rows:
+            device = r.dimension_values[0].value if r.dimension_values else ""
+            conv = safe_int(r.metric_values[0].value) if len(r.metric_values) > 0 else 0
+            sess = safe_int(r.metric_values[1].value) if len(r.metric_values) > 1 else 0
+            rate = safe_float(r.metric_values[2].value) if len(r.metric_values) > 2 else 0.0
+            device_rows.append({
+                "device": device,
+                "conversions": conv,
+                "sessions": sess,
+                "conversionRate": rate,
+            })
+
+    # -----------------------------
+    # 2) AGE: userAgeBracket
+    # -----------------------------
+    age_req = RunReportRequest(
+        property=prop,
+        date_ranges=dr,
+        dimensions=[Dimension(name="userAgeBracket")],
+        metrics=[Metric(name="conversions")],
+        order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
+        limit=50,
+    )
+    age_res = run(age_req)
+
+    age_rows = []
+    if age_res.rows:
+        for r in age_res.rows:
+            age = r.dimension_values[0].value if r.dimension_values else ""
+            conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
+            age_rows.append({"age": age, "conversions": conv})
+
+    # -----------------------------
+    # 3) GENDER: userGender
+    # -----------------------------
+    gender_req = RunReportRequest(
+        property=prop,
+        date_ranges=dr,
+        dimensions=[Dimension(name="userGender")],
+        metrics=[Metric(name="conversions")],
+        order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
+        limit=50,
+    )
+    gender_res = run(gender_req)
+
+    gender_rows = []
+    if gender_res.rows:
+        for r in gender_res.rows:
+            g = r.dimension_values[0].value if r.dimension_values else ""
+            conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
+            gender_rows.append({"gender": g, "conversions": conv})
+
+    result = {
+        "propertyId": property_id,
+        "dateRange": {"start_date": start_date, "end_date": end_date},
+        "device": {"dimension": "deviceCategory", "rows": device_rows},
+        "age": {"dimension": "userAgeBracket", "rows": age_rows},
+        "gender": {"dimension": "userGender", "rows": gender_rows},
+        "notes": {
+            "demographics": "Age/Gender may be empty due to consent, thresholding, or Google signals/demographics settings."
+        }
+    }
+
+    return (json.dumps(result), 200, _cors_headers())
