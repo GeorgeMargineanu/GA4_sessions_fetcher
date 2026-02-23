@@ -683,24 +683,21 @@ def ga4_location_interest_breakdown_oauth(request):
     """
     Returns:
       - totals: all conversions, paid conversions
-      - location: Top 5 cities by ALL conversions + PAID conversions for same cities
-      - interests: Top 5 brandingInterest by ALL conversions + PAID conversions for same interests
-
-    Notes:
-      - "Interests" uses GA4 Data API dimension `brandingInterest`. :contentReference[oaicite:1]{index=1}
-      - Paid definition is same as your previous "Paid" filter approach.
+      - location: Top N cities by ALL conversions + PAID conversions for same cities
+      - interests: Top N brandingInterest by ALL conversions + PAID conversions for same interests
 
     Required:
       Authorization: Bearer <ACCESS_TOKEN>
 
-    Params:
+    Params (querystring or JSON):
       property_id (required)
       start_date (optional) default 30daysAgo
-      end_date (optional) default today
-      limit (optional) default 5
+      end_date   (optional) default today
+      limit      (optional) default 5, max 50
       location_dim (optional) default city
       interests_dim (optional) default brandingInterest
     """
+
     pre = _handle_preflight(request)
     if pre:
         return pre
@@ -714,10 +711,9 @@ def ga4_location_interest_breakdown_oauth(request):
     data = request.get_json(silent=True) or {}
 
     property_id = args.get("property_id") or data.get("property_id")
-    start_date  = args.get("start_date")  or data.get("start_date")  or "30daysAgo"
-    end_date    = args.get("end_date")    or data.get("end_date")    or "today"
-
-    limit_raw   = args.get("limit")       or data.get("limit")       or 5
+    start_date = args.get("start_date") or data.get("start_date") or "30daysAgo"
+    end_date = args.get("end_date") or data.get("end_date") or "today"
+    limit_raw = args.get("limit") or data.get("limit") or 5
     location_dim = args.get("location_dim") or data.get("location_dim") or "city"
     interests_dim = args.get("interests_dim") or data.get("interests_dim") or "brandingInterest"
 
@@ -728,10 +724,7 @@ def ga4_location_interest_breakdown_oauth(request):
         limit = int(limit_raw)
     except Exception:
         limit = 5
-    if limit <= 0:
-        limit = 5
-    if limit > 50:
-        limit = 50
+    limit = max(1, min(limit, 50))
 
     data_client = BetaAnalyticsDataClient(credentials=user_creds)
     prop = f"properties/{property_id}"
@@ -750,35 +743,37 @@ def ga4_location_interest_breakdown_oauth(request):
     # Paid filter (same intent as before)
     # -----------------------------
     paid_filter = FilterExpression(
-        or_group=FilterExpressionList(expressions=[
-            FilterExpression(
-                filter=Filter(
-                    field_name="sessionDefaultChannelGroup",
-                    string_filter=Filter.StringFilter(
-                        match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                        value="(?i)^paid"
-                    ),
-                )
-            ),
-            FilterExpression(
-                filter=Filter(
-                    field_name="sessionMedium",
-                    string_filter=Filter.StringFilter(
-                        match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                        value=r"(?i)^(cpc|cpm|ppc|paid)$"
-                    ),
-                )
-            ),
-            FilterExpression(
-                filter=Filter(
-                    field_name="sessionSourceMedium",
-                    string_filter=Filter.StringFilter(
-                        match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                        value=r"(?i)/(cpc|cpm|ppc|paid)$"
-                    ),
-                )
-            ),
-        ])
+        or_group=FilterExpressionList(
+            expressions=[
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionDefaultChannelGroup",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value="(?i)^paid",
+                        ),
+                    )
+                ),
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionMedium",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value=r"(?i)^(cpc|cpm|ppc|paid)$",
+                        ),
+                    )
+                ),
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionSourceMedium",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value=r"(?i)/(cpc|cpm|ppc|paid)$",
+                        ),
+                    )
+                ),
+            ]
+        )
     )
 
     # -----------------------------
@@ -805,24 +800,30 @@ def ga4_location_interest_breakdown_oauth(request):
     paid_conversions = safe_int(paid_total_res.rows[0].metric_values[0].value) if paid_total_res.rows else 0
 
     # -----------------------------
-    # Helpers for correlated breakdowns
+    # Helpers
     # -----------------------------
-    def normalize_city(name: str) -> str:
+    def normalize_city_output(name: str) -> str:
         if not name:
             return ""
         n = name.strip()
-        # Common GA4 output is "Bucharest"; you prefer "Bucuresti"
         if n.lower() == "bucharest":
             return "Bucuresti"
         return n
 
-    def breakdown_top_all_then_paid(dim_name: str, label_key: str):
+    def is_valid_label(lbl: str) -> bool:
+        if not lbl:
+            return False
+        l = lbl.strip().lower()
+        return l not in ("(not set)", "not set", "(not provided)", "unknown")
+
+    def breakdown_top_all_then_paid(dim_name: str, label_key: str, normalize_output_fn=None):
         """
         1) Get top N by ALL conversions (dimension + conversions)
-        2) For those labels, fetch PAID conversions (same dimension, with paid filter)
+        2) For those labels, fetch PAID conversions restricted to the same labels (dimension + paid_filter + inListFilter)
         3) Return correlated rows in the ALL-top order.
         """
-        # 1) ALL
+
+        # --- ALL (top N)
         all_req = RunReportRequest(
             property=prop,
             date_ranges=dr,
@@ -835,57 +836,76 @@ def ga4_location_interest_breakdown_oauth(request):
 
         labels = []
         all_map = {}
+
         if all_res.rows:
             for r in all_res.rows:
-                lbl = r.dimension_values[0].value if r.dimension_values else ""
+                raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
                 conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
-                if dim_name == "city":
-                    lbl = normalize_city(lbl)
-                if lbl:
-                    labels.append(lbl)
-                    all_map[lbl] = conv
+                if is_valid_label(raw_lbl):
+                    labels.append(raw_lbl)
+                    all_map[raw_lbl] = conv
 
-        # 2) PAID for same labels (single request; then filter locally)
+        # if nothing, return empty
+        if not labels:
+            return []
+
+        # --- PAID restricted to those labels
+        label_list_filter = FilterExpression(
+            filter=Filter(
+                field_name=dim_name,
+                in_list_filter=Filter.InListFilter(values=labels, case_sensitive=False),
+            )
+        )
+
         paid_req = RunReportRequest(
             property=prop,
             date_ranges=dr,
             dimensions=[Dimension(name=dim_name)],
             metrics=[Metric(name="conversions")],
-            dimension_filter=paid_filter,
-            order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
-            limit=500,  # allow enough to include the top labels
+            dimension_filter=FilterExpression(
+                and_group=FilterExpressionList(expressions=[paid_filter, label_list_filter])
+            ),
+            limit=len(labels),
         )
         paid_res = run(paid_req)
 
         paid_map = {}
         if paid_res.rows:
             for r in paid_res.rows:
-                lbl = r.dimension_values[0].value if r.dimension_values else ""
+                raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
                 conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
-                if dim_name == "city":
-                    lbl = normalize_city(lbl)
-                if lbl:
-                    paid_map[lbl] = paid_map.get(lbl, 0) + conv
+                if raw_lbl:
+                    paid_map[raw_lbl] = paid_map.get(raw_lbl, 0) + conv
 
-        rows_out = []
-        for lbl in labels:
-            rows_out.append({
-                label_key: lbl,
-                "allConversions": all_map.get(lbl, 0),
-                "paidConversions": paid_map.get(lbl, 0),
-            })
-
-        return rows_out
-
-    # -----------------------------
-    # 3) Location (Top 5 cities)
-    # -----------------------------
-    location_rows = breakdown_top_all_then_paid(location_dim, "location")
+        # --- Output (keep original ordering from ALL top)
+        out = []
+        for raw_lbl in labels:
+            out_lbl = normalize_output_fn(raw_lbl) if normalize_output_fn else raw_lbl
+            out.append(
+                {
+                    label_key: out_lbl,
+                    "allConversions": all_map.get(raw_lbl, 0),
+                    "paidConversions": paid_map.get(raw_lbl, 0),
+                }
+            )
+        return out
 
     # -----------------------------
-    # 4) Interests (Top 5 brandingInterest)
+    # 3) Location
     # -----------------------------
-    interests_rows = breakdown_top_all_then_paid(interests_dim, "interest")
+    location_rows = breakdown_top_all_then_paid(
+        location_dim,
+        "location",
+        normalize_output_fn=normalize_city_output if location_dim == "city" else None,
+    )
+
+    # -----------------------------
+    # 4) Interests
+    # -----------------------------
+    interests_rows = breakdown_top_all_then_paid(
+        interests_dim,
+        "interest",
+    )
 
     result = {
         "propertyId": property_id,
@@ -903,8 +923,9 @@ def ga4_location_interest_breakdown_oauth(request):
             "rows": interests_rows,
         },
         "notes": {
-            "interests_dimension": "Uses GA4 dimension brandingInterest (affinity-style interests).",
-            "paid_definition": "Paid is inferred via sessionDefaultChannelGroup starting with 'Paid' OR medium/sourceMedium matching cpc/cpm/ppc/paid.",
+            "interests_dimension": "Uses GA4 dimension brandingInterest.",
+            "paid_definition": "Paid inferred via sessionDefaultChannelGroup starts with 'Paid' OR medium/sourceMedium matching cpc/cpm/ppc/paid.",
+            "correlation_method": "Top labels are selected by ALL conversions, then PAID conversions are returned for the same labels only.",
         },
     }
 
