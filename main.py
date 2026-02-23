@@ -685,17 +685,6 @@ def ga4_location_interest_breakdown_oauth(request):
       - totals: all conversions, paid conversions
       - location: Top N cities by ALL conversions + PAID conversions for same cities
       - interests: Top N brandingInterest by ALL conversions + PAID conversions for same interests
-
-    Required:
-      Authorization: Bearer <ACCESS_TOKEN>
-
-    Params (querystring or JSON):
-      property_id (required)
-      start_date (optional) default 30daysAgo
-      end_date   (optional) default today
-      limit      (optional) default 5, max 50
-      location_dim (optional) default city
-      interests_dim (optional) default brandingInterest
     """
 
     pre = _handle_preflight(request)
@@ -703,230 +692,234 @@ def ga4_location_interest_breakdown_oauth(request):
         return pre
 
     try:
-        user_creds, _ = _get_user_credentials_from_request(request)
-    except ValueError as e:
-        return (json.dumps({"error": str(e)}), 401, _cors_headers())
-
-    args = request.args or {}
-    data = request.get_json(silent=True) or {}
-
-    property_id = args.get("property_id") or data.get("property_id")
-    start_date = args.get("start_date") or data.get("start_date") or "30daysAgo"
-    end_date = args.get("end_date") or data.get("end_date") or "today"
-    limit_raw = args.get("limit") or data.get("limit") or 5
-    location_dim = args.get("location_dim") or data.get("location_dim") or "city"
-    interests_dim = args.get("interests_dim") or data.get("interests_dim") or "brandingInterest"
-
-    if not property_id:
-        return (json.dumps({"error": "Missing required parameter: property_id"}), 400, _cors_headers())
-
-    try:
-        limit = int(limit_raw)
-    except Exception:
-        limit = 5
-    limit = max(1, min(limit, 50))
-
-    data_client = BetaAnalyticsDataClient(credentials=user_creds)
-    prop = f"properties/{property_id}"
-    dr = [DateRange(start_date=start_date, end_date=end_date)]
-
-    def safe_int(v):
+        # -----------------------------
+        # Auth
+        # -----------------------------
         try:
-            return int(float(v))
+            user_creds, _ = _get_user_credentials_from_request(request)
+        except ValueError as e:
+            return (json.dumps({"error": str(e)}), 401, _cors_headers())
+
+        args = request.args or {}
+        data = request.get_json(silent=True) or {}
+
+        property_id = args.get("property_id") or data.get("property_id")
+        start_date = args.get("start_date") or data.get("start_date") or "30daysAgo"
+        end_date = args.get("end_date") or data.get("end_date") or "today"
+        limit_raw = args.get("limit") or data.get("limit") or 5
+        location_dim = args.get("location_dim") or data.get("location_dim") or "city"
+        interests_dim = args.get("interests_dim") or data.get("interests_dim") or "brandingInterest"
+
+        if not property_id:
+            return (json.dumps({"error": "Missing required parameter: property_id"}), 400, _cors_headers())
+
+        try:
+            limit = int(limit_raw)
         except Exception:
-            return 0
+            limit = 5
+        limit = max(1, min(limit, 50))
 
-    def run(req: RunReportRequest):
-        return data_client.run_report(req)
+        data_client = BetaAnalyticsDataClient(credentials=user_creds)
+        prop = f"properties/{property_id}"
+        dr = [DateRange(start_date=start_date, end_date=end_date)]
 
-    # -----------------------------
-    # Paid filter (same intent as before)
-    # -----------------------------
-    paid_filter = FilterExpression(
-        or_group=FilterExpressionList(
-            expressions=[
-                FilterExpression(
-                    filter=Filter(
-                        field_name="sessionDefaultChannelGroup",
-                        string_filter=Filter.StringFilter(
-                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value="(?i)^paid",
-                        ),
-                    )
-                ),
-                FilterExpression(
-                    filter=Filter(
-                        field_name="sessionMedium",
-                        string_filter=Filter.StringFilter(
-                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value=r"(?i)^(cpc|cpm|ppc|paid)$",
-                        ),
-                    )
-                ),
-                FilterExpression(
-                    filter=Filter(
-                        field_name="sessionSourceMedium",
-                        string_filter=Filter.StringFilter(
-                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value=r"(?i)/(cpc|cpm|ppc|paid)$",
-                        ),
-                    )
-                ),
-            ]
-        )
-    )
+        def safe_int(v):
+            try:
+                return int(float(v))
+            except Exception:
+                return 0
 
-    # -----------------------------
-    # 1) Totals (ALL conversions)
-    # -----------------------------
-    total_req = RunReportRequest(
-        property=prop,
-        date_ranges=dr,
-        metrics=[Metric(name="conversions")],
-    )
-    total_res = run(total_req)
-    total_conversions = safe_int(total_res.rows[0].metric_values[0].value) if total_res.rows else 0
+        def run(req: RunReportRequest):
+            return data_client.run_report(req)
 
-    # -----------------------------
-    # 2) Totals (PAID conversions)
-    # -----------------------------
-    paid_total_req = RunReportRequest(
-        property=prop,
-        date_ranges=dr,
-        metrics=[Metric(name="conversions")],
-        dimension_filter=paid_filter,
-    )
-    paid_total_res = run(paid_total_req)
-    paid_conversions = safe_int(paid_total_res.rows[0].metric_values[0].value) if paid_total_res.rows else 0
-
-    # -----------------------------
-    # Helpers
-    # -----------------------------
-    def normalize_city_output(name: str) -> str:
-        if not name:
-            return ""
-        n = name.strip()
-        if n.lower() == "bucharest":
-            return "Bucuresti"
-        return n
-
-    def is_valid_label(lbl: str) -> bool:
-        if not lbl:
-            return False
-        l = lbl.strip().lower()
-        return l not in ("(not set)", "not set", "(not provided)", "unknown")
-
-    def breakdown_top_all_then_paid(dim_name: str, label_key: str, normalize_output_fn=None):
-        """
-        1) Get top N by ALL conversions (dimension + conversions)
-        2) For those labels, fetch PAID conversions restricted to the same labels (dimension + paid_filter + inListFilter)
-        3) Return correlated rows in the ALL-top order.
-        """
-
-        # --- ALL (top N)
-        all_req = RunReportRequest(
-            property=prop,
-            date_ranges=dr,
-            dimensions=[Dimension(name=dim_name)],
-            metrics=[Metric(name="conversions")],
-            order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
-            limit=limit,
-        )
-        all_res = run(all_req)
-
-        labels = []
-        all_map = {}
-
-        if all_res.rows:
-            for r in all_res.rows:
-                raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
-                conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
-                if is_valid_label(raw_lbl):
-                    labels.append(raw_lbl)
-                    all_map[raw_lbl] = conv
-
-        # if nothing, return empty
-        if not labels:
-            return []
-
-        # --- PAID restricted to those labels
-        label_list_filter = FilterExpression(
-            filter=Filter(
-                field_name=dim_name,
-                in_list_filter=Filter.InListFilter(values=labels, case_sensitive=False),
+        # -----------------------------
+        # Paid filter (same intent as before)
+        # -----------------------------
+        paid_filter = FilterExpression(
+            or_group=FilterExpressionList(
+                expressions=[
+                    FilterExpression(
+                        filter=Filter(
+                            field_name="sessionDefaultChannelGroup",
+                            string_filter=Filter.StringFilter(
+                                match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                value="(?i)^paid",
+                            ),
+                        )
+                    ),
+                    FilterExpression(
+                        filter=Filter(
+                            field_name="sessionMedium",
+                            string_filter=Filter.StringFilter(
+                                match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                value=r"(?i)^(cpc|cpm|ppc|paid)$",
+                            ),
+                        )
+                    ),
+                    FilterExpression(
+                        filter=Filter(
+                            field_name="sessionSourceMedium",
+                            string_filter=Filter.StringFilter(
+                                match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                value=r"(?i)/(cpc|cpm|ppc|paid)$",
+                            ),
+                        )
+                    ),
+                ]
             )
         )
 
-        paid_req = RunReportRequest(
+        # -----------------------------
+        # 1) Totals (ALL conversions)
+        # -----------------------------
+        total_req = RunReportRequest(
             property=prop,
             date_ranges=dr,
-            dimensions=[Dimension(name=dim_name)],
             metrics=[Metric(name="conversions")],
-            dimension_filter=FilterExpression(
-                and_group=FilterExpressionList(expressions=[paid_filter, label_list_filter])
-            ),
-            limit=len(labels),
         )
-        paid_res = run(paid_req)
+        total_res = run(total_req)
+        total_conversions = safe_int(total_res.rows[0].metric_values[0].value) if total_res.rows else 0
 
-        paid_map = {}
-        if paid_res.rows:
-            for r in paid_res.rows:
-                raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
-                conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
-                if raw_lbl:
-                    paid_map[raw_lbl] = paid_map.get(raw_lbl, 0) + conv
+        # -----------------------------
+        # 2) Totals (PAID conversions)
+        # -----------------------------
+        paid_total_req = RunReportRequest(
+            property=prop,
+            date_ranges=dr,
+            metrics=[Metric(name="conversions")],
+            dimension_filter=paid_filter,
+        )
+        paid_total_res = run(paid_total_req)
+        paid_conversions = safe_int(paid_total_res.rows[0].metric_values[0].value) if paid_total_res.rows else 0
 
-        # --- Output (keep original ordering from ALL top)
-        out = []
-        for raw_lbl in labels:
-            out_lbl = normalize_output_fn(raw_lbl) if normalize_output_fn else raw_lbl
-            out.append(
-                {
-                    label_key: out_lbl,
-                    "allConversions": all_map.get(raw_lbl, 0),
-                    "paidConversions": paid_map.get(raw_lbl, 0),
-                }
+        # -----------------------------
+        # Helpers
+        # -----------------------------
+        def normalize_city_output(name: str) -> str:
+            if not name:
+                return ""
+            n = name.strip()
+            if n.lower() == "bucharest":
+                return "Bucuresti"
+            return n
+
+        def is_valid_label(lbl: str) -> bool:
+            if not lbl:
+                return False
+            l = lbl.strip().lower()
+            return l not in ("(not set)", "not set", "(not provided)", "unknown")
+
+        def breakdown_top_all_then_paid(dim_name: str, label_key: str, normalize_output_fn=None):
+            """
+            Robust approach without inListFilter:
+              1) Top N labels by ALL conversions
+              2) PAID conversions for the dimension (larger limit)
+              3) Correlate locally for only the top labels
+            """
+
+            # --- ALL (top N)
+            all_req = RunReportRequest(
+                property=prop,
+                date_ranges=dr,
+                dimensions=[Dimension(name=dim_name)],
+                metrics=[Metric(name="conversions")],
+                order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
+                limit=limit,
             )
-        return out
+            all_res = run(all_req)
 
-    # -----------------------------
-    # 3) Location
-    # -----------------------------
-    location_rows = breakdown_top_all_then_paid(
-        location_dim,
-        "location",
-        normalize_output_fn=normalize_city_output if location_dim == "city" else None,
-    )
+            labels = []
+            all_map = {}
 
-    # -----------------------------
-    # 4) Interests
-    # -----------------------------
-    interests_rows = breakdown_top_all_then_paid(
-        interests_dim,
-        "interest",
-    )
+            if all_res.rows:
+                for r in all_res.rows:
+                    raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
+                    conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
+                    if is_valid_label(raw_lbl):
+                        labels.append(raw_lbl)
+                        all_map[raw_lbl] = conv
 
-    result = {
-        "propertyId": property_id,
-        "dateRange": {"start_date": start_date, "end_date": end_date},
-        "totals": {
-            "all_conversions": total_conversions,
-            "paid_conversions": paid_conversions,
-        },
-        "location": {
-            "dimension": location_dim,
-            "rows": location_rows,
-        },
-        "interests": {
-            "dimension": interests_dim,
-            "rows": interests_rows,
-        },
-        "notes": {
-            "interests_dimension": "Uses GA4 dimension brandingInterest.",
-            "paid_definition": "Paid inferred via sessionDefaultChannelGroup starts with 'Paid' OR medium/sourceMedium matching cpc/cpm/ppc/paid.",
-            "correlation_method": "Top labels are selected by ALL conversions, then PAID conversions are returned for the same labels only.",
-        },
-    }
+            if not labels:
+                return []
 
-    return (json.dumps(result), 200, _cors_headers())
+            # --- PAID (bigger limit), correlate locally
+            # NOTE: We purposely DO NOT use inListFilter to avoid client/version incompatibilities.
+            paid_req = RunReportRequest(
+                property=prop,
+                date_ranges=dr,
+                dimensions=[Dimension(name=dim_name)],
+                metrics=[Metric(name="conversions")],
+                dimension_filter=paid_filter,
+                order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
+                limit=5000,  # enough headroom to include the top labels
+            )
+            paid_res = run(paid_req)
+
+            paid_map = {}
+            if paid_res.rows:
+                for r in paid_res.rows:
+                    raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
+                    conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
+                    if raw_lbl:
+                        paid_map[raw_lbl] = paid_map.get(raw_lbl, 0) + conv
+
+            out = []
+            for raw_lbl in labels:
+                out_lbl = normalize_output_fn(raw_lbl) if normalize_output_fn else raw_lbl
+                out.append(
+                    {
+                        label_key: out_lbl,
+                        "allConversions": all_map.get(raw_lbl, 0),
+                        "paidConversions": paid_map.get(raw_lbl, 0),
+                    }
+                )
+            return out
+
+        # -----------------------------
+        # 3) Location
+        # -----------------------------
+        location_rows = breakdown_top_all_then_paid(
+            location_dim,
+            "location",
+            normalize_output_fn=normalize_city_output if location_dim == "city" else None,
+        )
+
+        # -----------------------------
+        # 4) Interests
+        # -----------------------------
+        interests_rows = breakdown_top_all_then_paid(
+            interests_dim,
+            "interest",
+        )
+
+        result = {
+            "propertyId": property_id,
+            "dateRange": {"start_date": start_date, "end_date": end_date},
+            "totals": {
+                "all_conversions": total_conversions,
+                "paid_conversions": paid_conversions,
+            },
+            "location": {
+                "dimension": location_dim,
+                "rows": location_rows,
+            },
+            "interests": {
+                "dimension": interests_dim,
+                "rows": interests_rows,
+            },
+            "notes": {
+                "interests_dimension": "Uses GA4 dimension brandingInterest.",
+                "paid_definition": "Paid inferred via sessionDefaultChannelGroup starts with 'Paid' OR medium/sourceMedium matching cpc/cpm/ppc/paid.",
+                "correlation_method": "Top labels are selected by ALL conversions, then PAID conversions are mapped locally for the same labels (no inListFilter).",
+            },
+        }
+
+        return (json.dumps(result), 200, _cors_headers())
+
+    except Exception as e:
+        # Return a JSON error (so you see the real reason in Apps Script logs)
+        err = {
+            "error": str(e),
+            "trace": traceback.format_exc()[:8000],  # keep it bounded
+        }
+        return (json.dumps(err), 500, _cors_headers())
