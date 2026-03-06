@@ -923,3 +923,222 @@ def ga4_location_interest_breakdown_oauth(request):
             "trace": traceback.format_exc()[:8000],  # keep it bounded
         }
         return (json.dumps(err), 500, _cors_headers())
+
+
+def ga4_property_top_landing_pages_oauth(request):
+    """
+    Returns top 5 landing pages for a GA4 property and date range, with:
+      - total sessions
+      - paid sessions
+      - paid share
+    Optional:
+      - limit (default 5)
+      - include_query_string (default true)
+      - paid_dim (default landingPagePlusQueryString)
+
+    Query/body params:
+      - property_id   (required)
+      - start_date    (optional, default 30daysAgo)
+      - end_date      (optional, default today)
+      - limit         (optional, default 5)
+      - include_query_string (optional, true/false; default true)
+    """
+    pre = _handle_preflight(request)
+    if pre:
+        return pre
+
+    try:
+        try:
+            user_creds, _ = _get_user_credentials_from_request(request)
+        except ValueError as e:
+            return (json.dumps({"error": str(e)}), 401, _cors_headers())
+
+        # -----------------------------
+        # Parameters: query string or JSON body
+        # -----------------------------
+        property_id = request.args.get("property_id") if request.args else None
+        start_date = request.args.get("start_date") if request.args else None
+        end_date = request.args.get("end_date") if request.args else None
+        limit = request.args.get("limit") if request.args else None
+        include_query_string = request.args.get("include_query_string") if request.args else None
+
+        if not property_id:
+            data = request.get_json(silent=True) or {}
+            property_id = property_id or data.get("property_id")
+            start_date = start_date or data.get("start_date")
+            end_date = end_date or data.get("end_date")
+            limit = limit or data.get("limit")
+            include_query_string = include_query_string or data.get("include_query_string")
+
+        if not property_id:
+            return (json.dumps({"error": "Missing required parameter: property_id"}), 400, _cors_headers())
+
+        start_date = start_date or "30daysAgo"
+        end_date = end_date or "today"
+
+        try:
+            limit = int(limit) if limit is not None else 5
+        except Exception:
+            limit = 5
+
+        limit = max(1, min(limit, 100))
+
+        include_query_string = str(include_query_string).strip().lower() if include_query_string is not None else "true"
+        include_query_string = include_query_string in ("true", "1", "yes", "y")
+
+        # landingPagePlusQueryString is the GA4 landing page dimension for pages report style usage.
+        # If you want cleaner grouping, use landingPage instead.
+        landing_dim_name = "landingPagePlusQueryString" if include_query_string else "landingPage"
+
+        data_client = BetaAnalyticsDataClient(credentials=user_creds)
+        prop = f"properties/{property_id}"
+        dr = [DateRange(start_date=start_date, end_date=end_date)]
+
+        def run(req: RunReportRequest):
+            return data_client.run_report(req)
+
+        def safe_int(v):
+            try:
+                return int(float(v))
+            except Exception:
+                return 0
+
+        def safe_float(v):
+            try:
+                return float(v)
+            except Exception:
+                return 0.0
+
+        # -----------------------------
+        # 1) Top landing pages by total sessions
+        # -----------------------------
+        # landingPage / landingPagePlusQueryString + sessions is valid for Core Reporting.
+        # The Pages and screens predefined reports are built using the same Data API concepts. 
+        # Docs confirm landing-page-style page dimensions and session metrics are available. :contentReference[oaicite:1]{index=1}
+        top_req = RunReportRequest(
+            property=prop,
+            date_ranges=dr,
+            dimensions=[Dimension(name=landing_dim_name)],
+            metrics=[Metric(name="sessions")],
+            order_bys=[OrderBy(metric={"metric_name": "sessions"}, desc=True)],
+            limit=limit,
+        )
+        top_res = run(top_req)
+
+        landing_pages = []
+        page_keys = []
+
+        if top_res.rows:
+            for r in top_res.rows:
+                lp = r.dimension_values[0].value or "(not set)"
+                total_sessions = safe_int(r.metric_values[0].value)
+                landing_pages.append({
+                    "landingPage": lp,
+                    "totalSessions": total_sessions,
+                    "paidSessions": 0,
+                    "paidShare": 0.0,
+                })
+                page_keys.append(lp)
+
+        # If nothing returned, respond early
+        if not landing_pages:
+            result = {
+                "propertyId": property_id,
+                "dateRange": {"start_date": start_date, "end_date": end_date},
+                "dimension": landing_dim_name,
+                "rows": [],
+            }
+            return (json.dumps(result), 200, _cors_headers())
+
+        # -----------------------------
+        # 2) Paid sessions for those same landing pages
+        # -----------------------------
+        # Session-scoped dimensions are used in the paid filter:
+        # - sessionDefaultChannelGroup
+        # - sessionMedium
+        # - sessionSourceMedium
+        # These are valid GA4 Data API dimensions. :contentReference[oaicite:2]{index=2}
+        paid_filter = FilterExpression(
+            and_group=FilterExpressionList(expressions=[
+                FilterExpression(
+                    filter=Filter(
+                        field_name=landing_dim_name,
+                        in_list_filter=Filter.InListFilter(values=page_keys),
+                    )
+                ),
+                FilterExpression(
+                    or_group=FilterExpressionList(expressions=[
+                        FilterExpression(
+                            filter=Filter(
+                                field_name="sessionDefaultChannelGroup",
+                                string_filter=Filter.StringFilter(
+                                    match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                    value=r"(?i)^paid"
+                                ),
+                            )
+                        ),
+                        FilterExpression(
+                            filter=Filter(
+                                field_name="sessionMedium",
+                                string_filter=Filter.StringFilter(
+                                    match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                    value=r"(?i)^(cpc|cpm|ppc|paid|display|paid social)$"
+                                ),
+                            )
+                        ),
+                        FilterExpression(
+                            filter=Filter(
+                                field_name="sessionSourceMedium",
+                                string_filter=Filter.StringFilter(
+                                    match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                    value=r"(?i)/(cpc|cpm|ppc|paid|display)$"
+                                ),
+                            )
+                        ),
+                    ])
+                )
+            ])
+        )
+
+        paid_req = RunReportRequest(
+            property=prop,
+            date_ranges=dr,
+            dimensions=[Dimension(name=landing_dim_name)],
+            metrics=[Metric(name="sessions")],
+            dimension_filter=paid_filter,
+            order_bys=[OrderBy(metric={"metric_name": "sessions"}, desc=True)],
+            limit=max(limit, len(page_keys)),
+        )
+        paid_res = run(paid_req)
+
+        paid_map = {}
+        if paid_res.rows:
+            for r in paid_res.rows:
+                lp = r.dimension_values[0].value or "(not set)"
+                paid_sessions = safe_int(r.metric_values[0].value)
+                paid_map[lp] = paid_sessions
+
+        # -----------------------------
+        # 3) Merge totals + paid
+        # -----------------------------
+        for row in landing_pages:
+            paid_sessions = paid_map.get(row["landingPage"], 0)
+            total_sessions = row["totalSessions"]
+            row["paidSessions"] = paid_sessions
+            row["paidShare"] = (paid_sessions / total_sessions) if total_sessions > 0 else 0.0
+
+        result = {
+            "propertyId": property_id,
+            "dateRange": {"start_date": start_date, "end_date": end_date},
+            "dimension": landing_dim_name,
+            "rows": landing_pages,
+        }
+
+        return (json.dumps(result), 200, _cors_headers())
+
+    except Exception as e:
+        err = {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
+        return (json.dumps(err), 500, _cors_headers())
