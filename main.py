@@ -1,6 +1,7 @@
 import json
 from typing import Tuple
 import traceback
+import functions_framework
 
 from google.analytics.admin import AnalyticsAdminServiceClient
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
@@ -925,24 +926,8 @@ def ga4_location_interest_breakdown_oauth(request):
         return (json.dumps(err), 500, _cors_headers())
 
 
+@functions_framework.http
 def ga4_property_top_landing_pages_oauth(request):
-    """
-    Returns top 5 landing pages for a GA4 property and date range, with:
-      - total sessions
-      - paid sessions
-      - paid share
-    Optional:
-      - limit (default 5)
-      - include_query_string (default true)
-      - paid_dim (default landingPagePlusQueryString)
-
-    Query/body params:
-      - property_id   (required)
-      - start_date    (optional, default 30daysAgo)
-      - end_date      (optional, default today)
-      - limit         (optional, default 5)
-      - include_query_string (optional, true/false; default true)
-    """
     pre = _handle_preflight(request)
     if pre:
         return pre
@@ -953,9 +938,6 @@ def ga4_property_top_landing_pages_oauth(request):
         except ValueError as e:
             return (json.dumps({"error": str(e)}), 401, _cors_headers())
 
-        # -----------------------------
-        # Parameters: query string or JSON body
-        # -----------------------------
         property_id = request.args.get("property_id") if request.args else None
         start_date = request.args.get("start_date") if request.args else None
         end_date = request.args.get("end_date") if request.args else None
@@ -986,16 +968,11 @@ def ga4_property_top_landing_pages_oauth(request):
         include_query_string = str(include_query_string).strip().lower() if include_query_string is not None else "true"
         include_query_string = include_query_string in ("true", "1", "yes", "y")
 
-        # landingPagePlusQueryString is the GA4 landing page dimension for pages report style usage.
-        # If you want cleaner grouping, use landingPage instead.
         landing_dim_name = "landingPagePlusQueryString" if include_query_string else "landingPage"
 
         data_client = BetaAnalyticsDataClient(credentials=user_creds)
         prop = f"properties/{property_id}"
         dr = [DateRange(start_date=start_date, end_date=end_date)]
-
-        def run(req: RunReportRequest):
-            return data_client.run_report(req)
 
         def safe_int(v):
             try:
@@ -1003,18 +980,6 @@ def ga4_property_top_landing_pages_oauth(request):
             except Exception:
                 return 0
 
-        def safe_float(v):
-            try:
-                return float(v)
-            except Exception:
-                return 0.0
-
-        # -----------------------------
-        # 1) Top landing pages by total sessions
-        # -----------------------------
-        # landingPage / landingPagePlusQueryString + sessions is valid for Core Reporting.
-        # The Pages and screens predefined reports are built using the same Data API concepts. 
-        # Docs confirm landing-page-style page dimensions and session metrics are available. :contentReference[oaicite:1]{index=1}
         top_req = RunReportRequest(
             property=prop,
             date_ranges=dr,
@@ -1023,7 +988,7 @@ def ga4_property_top_landing_pages_oauth(request):
             order_bys=[OrderBy(metric={"metric_name": "sessions"}, desc=True)],
             limit=limit,
         )
-        top_res = run(top_req)
+        top_res = data_client.run_report(top_req)
 
         landing_pages = []
         page_keys = []
@@ -1040,7 +1005,6 @@ def ga4_property_top_landing_pages_oauth(request):
                 })
                 page_keys.append(lp)
 
-        # If nothing returned, respond early
         if not landing_pages:
             result = {
                 "propertyId": property_id,
@@ -1050,14 +1014,6 @@ def ga4_property_top_landing_pages_oauth(request):
             }
             return (json.dumps(result), 200, _cors_headers())
 
-        # -----------------------------
-        # 2) Paid sessions for those same landing pages
-        # -----------------------------
-        # Session-scoped dimensions are used in the paid filter:
-        # - sessionDefaultChannelGroup
-        # - sessionMedium
-        # - sessionSourceMedium
-        # These are valid GA4 Data API dimensions. :contentReference[oaicite:2]{index=2}
         paid_filter = FilterExpression(
             and_group=FilterExpressionList(expressions=[
                 FilterExpression(
@@ -1109,7 +1065,7 @@ def ga4_property_top_landing_pages_oauth(request):
             order_bys=[OrderBy(metric={"metric_name": "sessions"}, desc=True)],
             limit=max(limit, len(page_keys)),
         )
-        paid_res = run(paid_req)
+        paid_res = data_client.run_report(paid_req)
 
         paid_map = {}
         if paid_res.rows:
@@ -1118,9 +1074,6 @@ def ga4_property_top_landing_pages_oauth(request):
                 paid_sessions = safe_int(r.metric_values[0].value)
                 paid_map[lp] = paid_sessions
 
-        # -----------------------------
-        # 3) Merge totals + paid
-        # -----------------------------
         for row in landing_pages:
             paid_sessions = paid_map.get(row["landingPage"], 0)
             total_sessions = row["totalSessions"]
