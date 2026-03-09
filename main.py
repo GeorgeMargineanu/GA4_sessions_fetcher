@@ -14,6 +14,7 @@ from google.analytics.data_v1beta.types import (
     FilterExpression,
     FilterExpressionList,
     Filter,
+    CheckCompatibilityRequest
 )
 from google.oauth2.credentials import Credentials
 
@@ -678,14 +679,16 @@ def ga4_device_age_gender_breakdown_oauth(request):
 
 
 # ============================
-# FUNCTION: LOCATION + INTERESTS (ALL + PAID CONVERSIONS)
+# FUNCTION: LOCATION + INTERESTS (SAFE / COMPATIBILITY-AWARE)
 # ============================
 def ga4_location_interest_breakdown_oauth(request):
     """
     Returns:
       - totals: all conversions, paid conversions
       - location: Top N cities by ALL conversions + PAID conversions for same cities
-      - interests: Top N brandingInterest by ALL conversions + PAID conversions for same interests
+      - interests: Top N interests by ALL conversions + PAID conversions for same interests
+        BUT only if compatible in GA4
+      - if interests request is incompatible, returns a non-fatal warning and empty interests rows
     """
 
     pre = _handle_preflight(request)
@@ -724,17 +727,130 @@ def ga4_location_interest_breakdown_oauth(request):
         prop = f"properties/{property_id}"
         dr = [DateRange(start_date=start_date, end_date=end_date)]
 
+        # -----------------------------
+        # Helpers
+        # -----------------------------
         def safe_int(v):
             try:
                 return int(float(v))
             except Exception:
                 return 0
 
-        def run(req: RunReportRequest):
+        def normalize_city_output(name: str) -> str:
+            if not name:
+                return ""
+            n = name.strip()
+            if n.lower() == "bucharest":
+                return "Bucuresti"
+            return n
+
+        def is_valid_label(lbl: str) -> bool:
+            if not lbl:
+                return False
+            l = lbl.strip().lower()
+            return l not in ("(not set)", "not set", "(not provided)", "unknown", "unassigned")
+
+        def run_report(req: RunReportRequest):
             return data_client.run_report(req)
 
+        def check_request_compatibility(
+            dimensions,
+            metrics,
+            dimension_filter=None
+        ):
+            """
+            Uses GA4 checkCompatibility before run_report.
+            Returns:
+              {
+                "compatible": bool,
+                "response": raw response or None,
+                "error": str or None
+              }
+            """
+            try:
+                compat_req = CheckCompatibilityRequest(
+                    property=prop,
+                    dimensions=dimensions,
+                    metrics=metrics,
+                    dimension_filter=dimension_filter,
+                    date_ranges=dr,
+                )
+                compat_res = data_client.check_compatibility(request=compat_req)
+
+                incompatible_dims = []
+                incompatible_metrics = []
+
+                for d in compat_res.dimension_compatibilities:
+                    if str(d.compatibility).upper().endswith("INCOMPATIBLE"):
+                        incompatible_dims.append(d.dimension_metadata.api_name)
+
+                for m in compat_res.metric_compatibilities:
+                    if str(m.compatibility).upper().endswith("INCOMPATIBLE"):
+                        incompatible_metrics.append(m.metric_metadata.api_name)
+
+                return {
+                    "compatible": len(incompatible_dims) == 0 and len(incompatible_metrics) == 0,
+                    "response": compat_res,
+                    "error": None if (len(incompatible_dims) == 0 and len(incompatible_metrics) == 0)
+                             else f"Incompatible dimensions={incompatible_dims}, metrics={incompatible_metrics}",
+                }
+            except Exception as e:
+                return {
+                    "compatible": False,
+                    "response": None,
+                    "error": f"Compatibility check failed: {str(e)}",
+                }
+
+        def safe_run_report(
+            dimensions,
+            metrics,
+            dimension_filter=None,
+            order_bys=None,
+            limit_value=None
+        ):
+            """
+            Compatibility-aware run_report.
+            Returns:
+              {
+                "ok": bool,
+                "rows": report rows or [],
+                "warning": str or None
+              }
+            """
+            compat = check_request_compatibility(
+                dimensions=dimensions,
+                metrics=metrics,
+                dimension_filter=dimension_filter
+            )
+
+            if not compat["compatible"]:
+                return {
+                    "ok": False,
+                    "rows": [],
+                    "warning": compat["error"] or "Incompatible GA4 request",
+                }
+
+            try:
+                req = RunReportRequest(
+                    property=prop,
+                    date_ranges=dr,
+                    dimensions=dimensions,
+                    metrics=metrics,
+                    dimension_filter=dimension_filter,
+                    order_bys=order_bys or [],
+                    limit=limit_value if limit_value is not None else 0,
+                )
+                res = run_report(req)
+                return {"ok": True, "rows": res.rows or [], "warning": None}
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "rows": [],
+                    "warning": f"run_report failed: {str(e)}",
+                }
+
         # -----------------------------
-        # Paid filter (same intent as before)
+        # Paid filter
         # -----------------------------
         paid_filter = FilterExpression(
             or_group=FilterExpressionList(
@@ -771,160 +887,170 @@ def ga4_location_interest_breakdown_oauth(request):
         )
 
         # -----------------------------
-        # 1) Totals (ALL conversions)
+        # Totals
         # -----------------------------
-        total_req = RunReportRequest(
-            property=prop,
-            date_ranges=dr,
-            metrics=[Metric(name="conversions")],
+        total_report = safe_run_report(
+            dimensions=[],
+            metrics=[Metric(name="conversions")]
         )
-        total_res = run(total_req)
-        total_conversions = safe_int(total_res.rows[0].metric_values[0].value) if total_res.rows else 0
-
-        # -----------------------------
-        # 2) Totals (PAID conversions)
-        # -----------------------------
-        paid_total_req = RunReportRequest(
-            property=prop,
-            date_ranges=dr,
-            metrics=[Metric(name="conversions")],
-            dimension_filter=paid_filter,
+        total_conversions = (
+            safe_int(total_report["rows"][0].metric_values[0].value)
+            if total_report["ok"] and total_report["rows"]
+            else 0
         )
-        paid_total_res = run(paid_total_req)
-        paid_conversions = safe_int(paid_total_res.rows[0].metric_values[0].value) if paid_total_res.rows else 0
+
+        paid_total_report = safe_run_report(
+            dimensions=[],
+            metrics=[Metric(name="conversions")],
+            dimension_filter=paid_filter
+        )
+        paid_conversions = (
+            safe_int(paid_total_report["rows"][0].metric_values[0].value)
+            if paid_total_report["ok"] and paid_total_report["rows"]
+            else 0
+        )
+
+        warnings = []
+        if total_report["warning"]:
+            warnings.append({"section": "totals_all", "message": total_report["warning"]})
+        if paid_total_report["warning"]:
+            warnings.append({"section": "totals_paid", "message": paid_total_report["warning"]})
 
         # -----------------------------
-        # Helpers
+        # Breakdown helper
         # -----------------------------
-        def normalize_city_output(name: str) -> str:
-            if not name:
-                return ""
-            n = name.strip()
-            if n.lower() == "bucharest":
-                return "Bucuresti"
-            return n
-
-        def is_valid_label(lbl: str) -> bool:
-            if not lbl:
-                return False
-            l = lbl.strip().lower()
-            return l not in ("(not set)", "not set", "(not provided)", "unknown")
-
         def breakdown_top_all_then_paid(dim_name: str, label_key: str, normalize_output_fn=None):
             """
-            Robust approach without inListFilter:
-              1) Top N labels by ALL conversions
-              2) PAID conversions for the dimension (larger limit)
-              3) Correlate locally for only the top labels
+            1) Top N labels by ALL conversions
+            2) Pull PAID conversions for same dimension
+            3) Correlate locally
+            4) If incompatible, return empty rows + warning instead of 500
             """
+            dim = [Dimension(name=dim_name)]
+            metric = [Metric(name="conversions")]
 
-            # --- ALL (top N)
-            all_req = RunReportRequest(
-                property=prop,
-                date_ranges=dr,
-                dimensions=[Dimension(name=dim_name)],
-                metrics=[Metric(name="conversions")],
+            all_report = safe_run_report(
+                dimensions=dim,
+                metrics=metric,
                 order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
-                limit=limit,
+                limit_value=limit
             )
-            all_res = run(all_req)
+
+            if not all_report["ok"]:
+                return {
+                    "rows": [],
+                    "warning": f"ALL report for {dim_name} not available: {all_report['warning']}"
+                }
 
             labels = []
             all_map = {}
 
-            if all_res.rows:
-                for r in all_res.rows:
-                    raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
-                    conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
-                    if is_valid_label(raw_lbl):
-                        labels.append(raw_lbl)
-                        all_map[raw_lbl] = conv
+            for r in all_report["rows"]:
+                raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
+                conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
+                if is_valid_label(raw_lbl):
+                    labels.append(raw_lbl)
+                    all_map[raw_lbl] = conv
 
             if not labels:
-                return []
+                return {"rows": [], "warning": None}
 
-            # --- PAID (bigger limit), correlate locally
-            # NOTE: We purposely DO NOT use inListFilter to avoid client/version incompatibilities.
-            paid_req = RunReportRequest(
-                property=prop,
-                date_ranges=dr,
-                dimensions=[Dimension(name=dim_name)],
-                metrics=[Metric(name="conversions")],
+            paid_report = safe_run_report(
+                dimensions=dim,
+                metrics=metric,
                 dimension_filter=paid_filter,
                 order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
-                limit=5000,  # enough headroom to include the top labels
+                limit_value=5000
             )
-            paid_res = run(paid_req)
+
+            if not paid_report["ok"]:
+                # Soft-fail: return ALL rows with paidConversions = 0
+                out = []
+                for raw_lbl in labels:
+                    out_lbl = normalize_output_fn(raw_lbl) if normalize_output_fn else raw_lbl
+                    out.append({
+                        label_key: out_lbl,
+                        "allConversions": all_map.get(raw_lbl, 0),
+                        "paidConversions": 0,
+                    })
+                return {
+                    "rows": out,
+                    "warning": f"PAID report for {dim_name} incompatible/unavailable: {paid_report['warning']}"
+                }
 
             paid_map = {}
-            if paid_res.rows:
-                for r in paid_res.rows:
-                    raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
-                    conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
-                    if raw_lbl:
-                        paid_map[raw_lbl] = paid_map.get(raw_lbl, 0) + conv
+            for r in paid_report["rows"]:
+                raw_lbl = r.dimension_values[0].value if r.dimension_values else ""
+                conv = safe_int(r.metric_values[0].value) if r.metric_values else 0
+                if raw_lbl:
+                    paid_map[raw_lbl] = paid_map.get(raw_lbl, 0) + conv
 
             out = []
             for raw_lbl in labels:
                 out_lbl = normalize_output_fn(raw_lbl) if normalize_output_fn else raw_lbl
-                out.append(
-                    {
-                        label_key: out_lbl,
-                        "allConversions": all_map.get(raw_lbl, 0),
-                        "paidConversions": paid_map.get(raw_lbl, 0),
-                    }
-                )
-            return out
+                out.append({
+                    label_key: out_lbl,
+                    "allConversions": all_map.get(raw_lbl, 0),
+                    "paidConversions": paid_map.get(raw_lbl, 0),
+                })
+
+            return {"rows": out, "warning": None}
 
         # -----------------------------
-        # 3) Location
+        # Location
         # -----------------------------
-        location_rows = breakdown_top_all_then_paid(
+        location_result = breakdown_top_all_then_paid(
             location_dim,
             "location",
             normalize_output_fn=normalize_city_output if location_dim == "city" else None,
         )
+        if location_result["warning"]:
+            warnings.append({"section": "location", "message": location_result["warning"]})
 
         # -----------------------------
-        # 4) Interests
+        # Interests
         # -----------------------------
-        interests_rows = breakdown_top_all_then_paid(
+        interests_result = breakdown_top_all_then_paid(
             interests_dim,
-            "interest",
+            "interest"
         )
+        if interests_result["warning"]:
+            warnings.append({"section": "interests", "message": interests_result["warning"]})
 
         result = {
             "propertyId": property_id,
-            "dateRange": {"start_date": start_date, "end_date": end_date},
+            "dateRange": {
+                "start_date": start_date,
+                "end_date": end_date
+            },
             "totals": {
                 "all_conversions": total_conversions,
                 "paid_conversions": paid_conversions,
             },
             "location": {
                 "dimension": location_dim,
-                "rows": location_rows,
+                "rows": location_result["rows"],
             },
             "interests": {
                 "dimension": interests_dim,
-                "rows": interests_rows,
+                "rows": interests_result["rows"],
             },
+            "warnings": warnings,
             "notes": {
-                "interests_dimension": "Uses GA4 dimension brandingInterest.",
+                "interests_dimension": "Uses GA4 dimension brandingInterest by default.",
                 "paid_definition": "Paid inferred via sessionDefaultChannelGroup starts with 'Paid' OR medium/sourceMedium matching cpc/cpm/ppc/paid.",
-                "correlation_method": "Top labels are selected by ALL conversions, then PAID conversions are mapped locally for the same labels (no inListFilter).",
+                "behavior": "If a dimension/filter/metric combination is incompatible in GA4, the function returns a warning and continues instead of failing the whole request.",
             },
         }
 
         return (json.dumps(result), 200, _cors_headers())
 
     except Exception as e:
-        # Return a JSON error (so you see the real reason in Apps Script logs)
         err = {
             "error": str(e),
-            "trace": traceback.format_exc()[:8000],  # keep it bounded
+            "trace": traceback.format_exc()[:8000],
         }
         return (json.dumps(err), 500, _cors_headers())
-
 
 @functions_framework.http
 def ga4_property_top_landing_pages_oauth(request):
