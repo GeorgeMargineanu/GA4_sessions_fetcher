@@ -679,16 +679,14 @@ def ga4_device_age_gender_breakdown_oauth(request):
 
 
 # ============================
-# FUNCTION: LOCATION + INTERESTS (SAFE / COMPATIBILITY-AWARE)
+# FUNCTION: LOCATION + INTERESTS (ALL + PAID CONVERSIONS)
 # ============================
 def ga4_location_interest_breakdown_oauth(request):
     """
     Returns:
       - totals: all conversions, paid conversions
       - location: Top N cities by ALL conversions + PAID conversions for same cities
-      - interests: Top N interests by ALL conversions + PAID conversions for same interests
-        BUT only if compatible in GA4
-      - if interests request is incompatible, returns a non-fatal warning and empty interests rows
+      - interests: Top N brandingInterest by ALL conversions + PAID conversions for same interests
     """
 
     pre = _handle_preflight(request)
@@ -727,127 +725,14 @@ def ga4_location_interest_breakdown_oauth(request):
         prop = f"properties/{property_id}"
         dr = [DateRange(start_date=start_date, end_date=end_date)]
 
-        # -----------------------------
-        # Helpers
-        # -----------------------------
         def safe_int(v):
             try:
                 return int(float(v))
             except Exception:
                 return 0
 
-        def normalize_city_output(name: str) -> str:
-            if not name:
-                return ""
-            n = name.strip()
-            if n.lower() == "bucharest":
-                return "Bucuresti"
-            return n
-
-        def is_valid_label(lbl: str) -> bool:
-            if not lbl:
-                return False
-            l = lbl.strip().lower()
-            return l not in ("(not set)", "not set", "(not provided)", "unknown", "unassigned")
-
-        def run_report(req: RunReportRequest):
+        def run(req: RunReportRequest):
             return data_client.run_report(req)
-
-        def check_request_compatibility(
-            dimensions,
-            metrics,
-            dimension_filter=None
-        ):
-            """
-            Uses GA4 checkCompatibility before run_report.
-            Returns:
-              {
-                "compatible": bool,
-                "response": raw response or None,
-                "error": str or None
-              }
-            """
-            try:
-                compat_req = CheckCompatibilityRequest(
-                    property=prop,
-                    dimensions=dimensions,
-                    metrics=metrics,
-                    dimension_filter=dimension_filter,
-                    date_ranges=dr,
-                )
-                compat_res = data_client.check_compatibility(request=compat_req)
-
-                incompatible_dims = []
-                incompatible_metrics = []
-
-                for d in compat_res.dimension_compatibilities:
-                    if str(d.compatibility).upper().endswith("INCOMPATIBLE"):
-                        incompatible_dims.append(d.dimension_metadata.api_name)
-
-                for m in compat_res.metric_compatibilities:
-                    if str(m.compatibility).upper().endswith("INCOMPATIBLE"):
-                        incompatible_metrics.append(m.metric_metadata.api_name)
-
-                return {
-                    "compatible": len(incompatible_dims) == 0 and len(incompatible_metrics) == 0,
-                    "response": compat_res,
-                    "error": None if (len(incompatible_dims) == 0 and len(incompatible_metrics) == 0)
-                             else f"Incompatible dimensions={incompatible_dims}, metrics={incompatible_metrics}",
-                }
-            except Exception as e:
-                return {
-                    "compatible": False,
-                    "response": None,
-                    "error": f"Compatibility check failed: {str(e)}",
-                }
-
-        def safe_run_report(
-            dimensions,
-            metrics,
-            dimension_filter=None,
-            order_bys=None,
-            limit_value=None
-        ):
-            """
-            Compatibility-aware run_report.
-            Returns:
-              {
-                "ok": bool,
-                "rows": report rows or [],
-                "warning": str or None
-              }
-            """
-            compat = check_request_compatibility(
-                dimensions=dimensions,
-                metrics=metrics,
-                dimension_filter=dimension_filter
-            )
-
-            if not compat["compatible"]:
-                return {
-                    "ok": False,
-                    "rows": [],
-                    "warning": compat["error"] or "Incompatible GA4 request",
-                }
-
-            try:
-                req = RunReportRequest(
-                    property=prop,
-                    date_ranges=dr,
-                    dimensions=dimensions,
-                    metrics=metrics,
-                    dimension_filter=dimension_filter,
-                    order_bys=order_bys or [],
-                    limit=limit_value if limit_value is not None else 0,
-                )
-                res = run_report(req)
-                return {"ok": True, "rows": res.rows or [], "warning": None}
-            except Exception as e:
-                return {
-                    "ok": False,
-                    "rows": [],
-                    "warning": f"run_report failed: {str(e)}",
-                }
 
         # -----------------------------
         # Paid filter
@@ -887,8 +772,103 @@ def ga4_location_interest_breakdown_oauth(request):
         )
 
         # -----------------------------
+        # Helpers
+        # -----------------------------
+        def normalize_city_output(name: str) -> str:
+            if not name:
+                return ""
+            n = name.strip()
+            if n.lower() == "bucharest":
+                return "Bucuresti"
+            return n
+
+        def is_valid_label(lbl: str) -> bool:
+            if not lbl:
+                return False
+            l = lbl.strip().lower()
+            return l not in ("(not set)", "not set", "(not provided)", "unknown", "unassigned")
+
+        def check_request_compatibility(dimensions, metrics, dimension_filter=None, metric_filter=None):
+            """
+            IMPORTANT:
+            checkCompatibility does NOT accept date_ranges.
+            """
+            try:
+                compat_req = CheckCompatibilityRequest(
+                    property=prop,
+                    dimensions=dimensions,
+                    metrics=metrics,
+                    dimension_filter=dimension_filter,
+                    metric_filter=metric_filter,
+                )
+                compat_res = data_client.check_compatibility(request=compat_req)
+
+                incompatible_dims = []
+                incompatible_metrics = []
+
+                for d in compat_res.dimension_compatibilities:
+                    if str(d.compatibility).upper().endswith("INCOMPATIBLE"):
+                        incompatible_dims.append(d.dimension_metadata.api_name)
+
+                for m in compat_res.metric_compatibilities:
+                    if str(m.compatibility).upper().endswith("INCOMPATIBLE"):
+                        incompatible_metrics.append(m.metric_metadata.api_name)
+
+                return {
+                    "compatible": len(incompatible_dims) == 0 and len(incompatible_metrics) == 0,
+                    "error": None if (len(incompatible_dims) == 0 and len(incompatible_metrics) == 0)
+                             else f"Incompatible dimensions={incompatible_dims}, metrics={incompatible_metrics}",
+                }
+            except Exception as e:
+                return {
+                    "compatible": False,
+                    "error": f"Compatibility check failed: {str(e)}",
+                }
+
+        def safe_run_report(dimensions, metrics, dimension_filter=None, metric_filter=None, order_bys=None, limit_value=None):
+            compat = check_request_compatibility(
+                dimensions=dimensions,
+                metrics=metrics,
+                dimension_filter=dimension_filter,
+                metric_filter=metric_filter,
+            )
+
+            if not compat["compatible"]:
+                return {
+                    "ok": False,
+                    "rows": [],
+                    "warning": compat["error"],
+                }
+
+            try:
+                req = RunReportRequest(
+                    property=prop,
+                    date_ranges=dr,
+                    dimensions=dimensions,
+                    metrics=metrics,
+                    dimension_filter=dimension_filter,
+                    metric_filter=metric_filter,
+                    order_bys=order_bys or [],
+                    limit=limit_value if limit_value is not None else 0,
+                )
+                res = run(req)
+                return {
+                    "ok": True,
+                    "rows": res.rows or [],
+                    "warning": None,
+                }
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "rows": [],
+                    "warning": f"run_report failed: {str(e)}",
+                }
+
+        # -----------------------------
         # Totals
         # -----------------------------
+        warnings = []
+
         total_report = safe_run_report(
             dimensions=[],
             metrics=[Metric(name="conversions")]
@@ -898,6 +878,8 @@ def ga4_location_interest_breakdown_oauth(request):
             if total_report["ok"] and total_report["rows"]
             else 0
         )
+        if total_report["warning"]:
+            warnings.append({"section": "totals_all", "message": total_report["warning"]})
 
         paid_total_report = safe_run_report(
             dimensions=[],
@@ -909,10 +891,6 @@ def ga4_location_interest_breakdown_oauth(request):
             if paid_total_report["ok"] and paid_total_report["rows"]
             else 0
         )
-
-        warnings = []
-        if total_report["warning"]:
-            warnings.append({"section": "totals_all", "message": total_report["warning"]})
         if paid_total_report["warning"]:
             warnings.append({"section": "totals_paid", "message": paid_total_report["warning"]})
 
@@ -920,18 +898,13 @@ def ga4_location_interest_breakdown_oauth(request):
         # Breakdown helper
         # -----------------------------
         def breakdown_top_all_then_paid(dim_name: str, label_key: str, normalize_output_fn=None):
-            """
-            1) Top N labels by ALL conversions
-            2) Pull PAID conversions for same dimension
-            3) Correlate locally
-            4) If incompatible, return empty rows + warning instead of 500
-            """
-            dim = [Dimension(name=dim_name)]
-            metric = [Metric(name="conversions")]
+            dims = [Dimension(name=dim_name)]
+            mets = [Metric(name="conversions")]
 
+            # 1) ALL conversions
             all_report = safe_run_report(
-                dimensions=dim,
-                metrics=metric,
+                dimensions=dims,
+                metrics=mets,
                 order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
                 limit_value=limit
             )
@@ -955,16 +928,16 @@ def ga4_location_interest_breakdown_oauth(request):
             if not labels:
                 return {"rows": [], "warning": None}
 
+            # 2) PAID conversions
             paid_report = safe_run_report(
-                dimensions=dim,
-                metrics=metric,
+                dimensions=dims,
+                metrics=mets,
                 dimension_filter=paid_filter,
                 order_bys=[OrderBy(metric={"metric_name": "conversions"}, desc=True)],
                 limit_value=5000
             )
 
             if not paid_report["ok"]:
-                # Soft-fail: return ALL rows with paidConversions = 0
                 out = []
                 for raw_lbl in labels:
                     out_lbl = normalize_output_fn(raw_lbl) if normalize_output_fn else raw_lbl
@@ -1012,17 +985,14 @@ def ga4_location_interest_breakdown_oauth(request):
         # -----------------------------
         interests_result = breakdown_top_all_then_paid(
             interests_dim,
-            "interest"
+            "interest",
         )
         if interests_result["warning"]:
             warnings.append({"section": "interests", "message": interests_result["warning"]})
 
         result = {
             "propertyId": property_id,
-            "dateRange": {
-                "start_date": start_date,
-                "end_date": end_date
-            },
+            "dateRange": {"start_date": start_date, "end_date": end_date},
             "totals": {
                 "all_conversions": total_conversions,
                 "paid_conversions": paid_conversions,
