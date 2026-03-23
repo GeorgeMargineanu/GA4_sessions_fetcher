@@ -261,13 +261,23 @@ def ga4_property_conversion_breakdown_oauth(request):
                         ),
                     )
                 ),
+                                # B) sessionMedium is cpc / cpm / paid 
+                FilterExpression(
+                    filter=Filter(
+                        field_name="sessionMedium",
+                        string_filter=Filter.StringFilter(
+                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                            value=r"(?i)^(cpc|cpm|ppc|paid)$"
+                        ),
+                    )
+                ),
                 # (Optional, but helpful) C) sessionSourceMedium contains /cpc or /cpm etc.
                 FilterExpression(
                     filter=Filter(
-                        field_name="sessionSourceMedium",
+                        field_name="isKeyEvent",
                         string_filter=Filter.StringFilter(
                             match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value=r"(?i)/(cpc|cpm|ppc|paid)$"
+                            value=r"(?i)/(true)$"
                         ),
                     )
                 ),
@@ -282,7 +292,7 @@ def ga4_property_conversion_breakdown_oauth(request):
                 Dimension(name="sessionMedium"),
                 Dimension(name="sessionSourceMedium"),
             ],
-            metrics=[Metric(name="conversions")],
+            metrics=[Metric(name="eventCount")],
             dimension_filter=paid_filter,
             limit=1000,
         )
