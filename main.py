@@ -247,21 +247,11 @@ def ga4_property_conversion_breakdown_oauth(request):
                         field_name="sessionDefaultChannelGroup",
                         string_filter=Filter.StringFilter(
                             match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value="(?i)^paid"
+                            value="(?i)(paid|display|cross)"
                         ),
                     )
                 ),
                 # B) sessionMedium is cpc / cpm / paid 
-                FilterExpression(
-                    filter=Filter(
-                        field_name="sessionMedium",
-                        string_filter=Filter.StringFilter(
-                            match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value=r"(?i)^(cpc|cpm|ppc|paid)$"
-                        ),
-                    )
-                ),
-                                # B) sessionMedium is cpc / cpm / paid 
                 FilterExpression(
                     filter=Filter(
                         field_name="sessionMedium",
@@ -277,7 +267,7 @@ def ga4_property_conversion_breakdown_oauth(request):
                         field_name="isKeyEvent",
                         string_filter=Filter.StringFilter(
                             match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
-                            value=r"(?i)/(true)$"
+                            value=r"(?i)(true)$"
                         ),
                     )
                 ),
